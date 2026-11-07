@@ -515,6 +515,7 @@ async function aiChat(kind, messages, { json = true, maxTokens = 2500, payload }
       try { return parseJSON(text); } catch { lastErr = new AIError('AI 返回的格式不对，正在重试…', 'format'); continue; }
     }
     const errText = await res.text().catch(() => '');
+    if (c.id === 'qwen' && /access to model denied|not eligible|eligible for using/i.test(errText)) throw new AIError('Key 是对的，但这个账号暂时没有「' + c.model + '」的使用权限。请到阿里云百炼控制台：① 确认已开通「模型服务」；② 如果 Key 是在子业务空间创建的，给该空间授权这个模型，或改用主账号默认空间的 Key；③ 如果是国际站（新加坡）账号，把接口地址改成 https://dashscope-intl.aliyuncs.com/compatible-mode/v1；④ 如果开了「免费额度用完即停」且额度已用完，可以把模型换成 qwen-turbo 或 qwen-flash 再试。', 'auth');
     if (res.status === 401 || res.status === 403) throw new AIError('API Key 无效或没有权限，请在设置里检查。' + shortErr(errText), 'auth');
     if (res.status === 429) { lastErr = new AIError('免费额度的调用频率到上限了，稍等一分钟再试。' + shortErr(errText), 'rate'); await sleep(4000 * (attempt + 1)); continue; }
     if (res.status === 404) throw new AIError('模型「' + c.model + '」不可用（可能已下线或名字写错）。请在设置 → AI 服务里把模型改成默认值' + (PROVIDERS[c.id]?.model ? '「' + PROVIDERS[c.id].model + '」' : '') + '后再试。' + shortErr(errText), 'cfg');
