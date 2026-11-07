@@ -56,7 +56,7 @@ function mdToHtml(md) {
 const PROVIDERS = {
   qwen: { name: '通义千问（阿里云百炼）', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', keyUrl: 'https://bailian.console.aliyun.com/?tab=model#/api-key', note: '国内直连，推荐中国大陆用户。新用户每个模型送免费额度，用完后按量计费也很便宜。' },
   glm: { name: '智谱 GLM-4-Flash', base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash-250414', keyUrl: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys', note: '国内直连，GLM-4-Flash 免费使用，适合零成本。' },
-  gemini: { name: 'Google Gemini', base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-flash', keyUrl: 'https://aistudio.google.com/apikey', note: '有免费额度（每分钟约 10 次请求）。中国大陆无法直接访问。' },
+  gemini: { name: 'Google Gemini', base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.1-flash-lite', keyUrl: 'https://aistudio.google.com/apikey', note: '有免费额度。中国大陆需要能访问 Google 的网络。若提示模型不可用，可把模型改成 gemini-flash-lite-latest。' },
   siliconflow: { name: '硅基流动 SiliconFlow', base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', keyUrl: 'https://cloud.siliconflow.cn/account/ak', note: '国内直连，部分小模型免费，解析质量略低。' },
   deepseek: { name: 'DeepSeek', base: 'https://api.deepseek.com', model: 'deepseek-chat', keyUrl: 'https://platform.deepseek.com/api_keys', note: '需要少量充值，价格很低，中文解析质量好。' },
   custom: { name: '自定义（OpenAI 兼容接口）', base: '', model: '', keyUrl: '', note: '填写任意 OpenAI 兼容服务的地址和模型名。' },
@@ -79,7 +79,7 @@ function applySettings() {
 }
 function aiCfg() {
   const p = PROVIDERS[S.provider] || PROVIDERS.qwen;
-  return { id: S.provider, key: (S.keys[S.provider] || '').trim(), model: (S.models[S.provider] || p.model).trim(), base: (S.bases[S.provider] || p.base).trim().replace(/\/+$/, '') };
+  return { id: S.provider, key: (S.keys[S.provider] || '').trim(), model: ((S.provider === 'gemini' && /^gemini-2\.5-flash$/.test((S.models.gemini || '').trim()) ? '' : S.models[S.provider]) || p.model).trim(), base: (S.bases[S.provider] || p.base).trim().replace(/\/+$/, '') };
 }
 const hasAI = () => MOCK || !!aiCfg().key;
 
@@ -517,7 +517,7 @@ async function aiChat(kind, messages, { json = true, maxTokens = 2500, payload }
     const errText = await res.text().catch(() => '');
     if (res.status === 401 || res.status === 403) throw new AIError('API Key 无效或没有权限，请在设置里检查。' + shortErr(errText), 'auth');
     if (res.status === 429) { lastErr = new AIError('免费额度的调用频率到上限了，稍等一分钟再试。' + shortErr(errText), 'rate'); await sleep(4000 * (attempt + 1)); continue; }
-    if (res.status === 404) throw new AIError('模型名或接口地址不对：' + c.model + shortErr(errText), 'cfg');
+    if (res.status === 404) throw new AIError('模型「' + c.model + '」不可用（可能已下线或名字写错）。请在设置 → AI 服务里把模型改成默认值' + (PROVIDERS[c.id]?.model ? '「' + PROVIDERS[c.id].model + '」' : '') + '后再试。' + shortErr(errText), 'cfg');
     lastErr = new AIError(`AI 服务出错（${res.status}）` + shortErr(errText), 'http');
     if (res.status < 500) break;
     await sleep(1500);
