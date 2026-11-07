@@ -150,7 +150,7 @@ function lemmaVariants(w) {
 const CH_RE = /^(?:(?:chapter|chap\.|part|book|volume|section|canto|letter|act)\s+(?:[0-9]+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty[\w-]*|thirty[\w-]*|forty[\w-]*|fifty[\w-]*|the\s+\w+)\b.{0,60}|(?:prologue|epilogue|preface|introduction|foreword|afterword|contents)\b.{0,40}|第[一二三四五六七八九十百千零〇0-9]+[章节部卷回篇].{0,30})$/i;
 const BLOCK = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,div,dd,dt,td,th,figcaption,section,article,aside,header,footer,tr,table,ul,ol,dl,body';
 const LEAF_SKIP = new Set(['UL', 'OL', 'DL', 'TABLE', 'TR', 'SECTION', 'ARTICLE', 'BODY']);
-function cleanText(s) { return s.replace(/­/g, '').replace(/[​-‍﻿]/g, '').replace(/\s+/g, ' ').trim(); }
+function cleanText(s) { return s.replace(/\u0001/g, ' ').replace(/­/g, '').replace(/[​-‍﻿]/g, '').replace(/\s+/g, ' ').trim(); }
 function leafBlocks(root) {
   const res = [];
   const walk = (el) => {
@@ -171,18 +171,80 @@ function leafBlocks(root) {
 function prepDom(doc) {
   $$('script,style,noscript,svg,math,img,figure > img', doc).forEach((e) => e.remove());
   $$('sup', doc).forEach((e) => { if (/^[\s\d*†‡§,\[\]]{1,6}$/.test(e.textContent)) e.remove(); });
-  $$('br', doc).forEach((e) => e.replaceWith(doc.createTextNode(' ')));
+  // 标题里的换行保留成分隔符，避免 “by 作者<br>Chapter One” 粘成一行
+  $$('br', doc).forEach((e) => e.replaceWith(doc.createTextNode(e.closest('h1,h2,h3,h4,h5,h6') ? '\u0001' : ' ')));
 }
 function parseXml(text, type = 'application/xhtml+xml') {
   let doc = new DOMParser().parseFromString(text, type);
   if (doc.querySelector('parsererror')) doc = new DOMParser().parseFromString(text, 'text/html');
   return doc;
 }
-function pushPara(ch, t, h) { t = cleanText(t); if (t) ch.paras.push(h ? { t, h: 1 } : { t }); }
+function pushPara(ch, t, h) {
+  if (h) {
+    // 标题按换行拆开；如果标题末尾带着 “Chapter …”，也单独拆出来
+    for (let part of String(t).split('\u0001')) {
+      part = cleanText(part); if (!part) continue;
+      const m = !CH_RE.test(part) && part.match(CH_TAIL_RE);
+      if (m && CH_RE.test(m[2])) { ch.paras.push({ t: m[1], h: 1 }); ch.paras.push({ t: m[2], h: 1 }); }
+      else ch.paras.push({ t: part, h: 1 });
+    }
+    return;
+  }
+  t = cleanText(t); if (t) ch.paras.push({ t });
+}
+const CH_TAIL_RE = /^(.{2,}?)\s+((?:chapter|chap\.|part|book|volume|canto|letter)\s+\S+)$/i;
+const NUM_HEAD_RE = /^(?:[ivxlcdm]{1,7}|\d{1,3})\.?$/i;
+// 是否像章节标题：标题标签里的 “Chapter …/第…章/罗马数字”，或独立一行的短 “Chapter …”
+function isChapterHead(para, numHeads) {
+  const t = para.t;
+  if (t.length > 70) return false;
+  if (para.h) return CH_RE.test(t) || (numHeads && NUM_HEAD_RE.test(t));
+  return t.length <= 40 && !/[,;]$/.test(t) && CH_RE.test(t);
+}
+// 在已有章节内部继续按章节标题切分（目录不全、整本书只在一两个文件里时很常见）
+function refineChapters(book) {
+  const numHeadCount = book.chapters.reduce((n, c) => n + c.paras.filter((p) => p.h && NUM_HEAD_RE.test(p.t)).length, 0);
+  const numHeads = numHeadCount >= 3;
+  const generic = (t) => !t || /^(start|开篇|cover|封面|title ?page|第 \d+ 部分)$/i.test(t);
+  const out = [];
+  for (const c of book.chapters) {
+    const idx = [];
+    c.paras.forEach((p, i) => { if (isChapterHead(p, numHeads)) idx.push(i); });
+    if (!idx.length) { out.push(c); continue; }
+    // 第一个章节标题之前的内容
+    const pre = c.paras.slice(0, idx[0]);
+    if (pre.length) {
+      // 只有书名、作者这几行标题：当作扉页丢掉
+      const titleOnly = pre.length <= 4 && pre.every((p) => p.h || p.t.length < 60) && pre.some((p) => p.h) && generic(c.title);
+      if (!titleOnly) out.push({ ...c, paras: pre });
+    }
+    idx.forEach((start, k) => {
+      const end = k + 1 < idx.length ? idx[k + 1] : c.paras.length;
+      let title = c.paras[start].t;
+      // 章节标题就在开头、原标题来自目录且不是 “Start/开篇” 这类占位：保留原标题
+      if (k === 0 && start === 0 && !generic(c.title)) title = c.title;
+      const body = c.paras.slice(start + 1, end);
+      out.push({ title, paras: body });
+    });
+  }
+  book.chapters = out;
+}
 function finalizeBook(book) {
   const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
-  for (const c of book.chapters) while (c.paras.length && c.title && norm(c.paras[0].t) === norm(c.title)) c.paras.shift();
+  refineChapters(book);
+  for (const c of book.chapters) {
+    // 开头重复章节名的标题行去掉（目录写 “1. Loomings”，正文是 “Loomings” 也算）
+    while (c.paras.length > 1 && c.title && (norm(c.paras[0].t) === norm(c.title) || (c.paras[0].h && norm(c.paras[0].t).length >= 3 && norm(c.title).includes(norm(c.paras[0].t))))) c.paras.shift();
+    // 标题只是 “Chapter 1 / IV / 第一章”，紧跟一行短副标题：并进章节名
+    const p0 = c.paras[0];
+    if (c.paras.length > 1 && p0.h && p0.t.length < 60 && !CH_RE.test(p0.t) && !NUM_HEAD_RE.test(p0.t) && /^(?:(?:chapter|chap\.|part|book|letter)\s+\S+|[ivxlcdm\d]+\.?|第[一二三四五六七八九十百千零〇0-9]+[章节部卷回篇])$/i.test(c.title || '')) {
+      c.title += ' · ' + p0.t; c.paras.shift();
+    }
+  }
   book.chapters = book.chapters.filter((c) => c.paras.length);
+  // 第一“章”只有书名/作者这一两行（扉页）：丢掉
+  const f = book.chapters[0];
+  if (book.chapters.length >= 3 && f && (!f.title || /^(start|开篇|cover|封面|title ?page)$/i.test(f.title)) && f.paras.length <= 3 && f.paras.every((p) => p.t.length < 80 && (p.h || f.paras.length <= 2))) book.chapters.shift();
   book.chapters.forEach((c, i) => { if (!c.title) c.title = '第 ' + (i + 1) + ' 部分'; });
   if (!book.chapters.length) throw new Error('没有在文件里找到文字。如果是扫描版 PDF（图片），目前无法识别。');
   return book;
@@ -215,7 +277,7 @@ async function parseEpub(file, prog) {
   if (navItem) {
     const nav = parseXml(await read(navItem.path) || '');
     const navs = [...nav.getElementsByTagName('nav')];
-    const tocNav = navs.find((n) => (n.getAttribute('epub:type') || n.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type') || '').includes('toc')) || navs[0];
+    const tocNav = navs.find((n) => (n.getAttribute('epub:type') || n.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type') || '').includes('toc')) || navs.find((n) => !/landmarks|page-list/.test(n.getAttribute('epub:type') || n.getAttributeNS?.('http://www.idpf.org/2007/ops', 'type') || ''));
     if (tocNav) for (const a of tocNav.getElementsByTagName('a')) {
       const href = a.getAttribute('href'); if (!href) continue;
       toc.push({ title: cleanText(a.textContent), path: resolve(navItem.path, href), frag: href.includes('#') ? decodeURIComponent(href.split('#')[1]) : '' });
@@ -408,7 +470,7 @@ function parseHtmlDoc(doc, title) {
       if (cur.paras.length || cur.title) { cur = { title: '', paras: [] }; book.chapters.push(cur); }
       cur.title = txt; continue;
     }
-    pushPara(cur, txt, /^H[1-6]$/.test(tag));
+    pushPara(cur, /^H[1-6]$/.test(tag) ? el.textContent : txt, /^H[1-6]$/.test(tag));
   }
   return finalizeBook(book);
 }
